@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Osprey Rescue</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+html, body { margin:0; padding:0; overflow:hidden; background:#0b1220; font-family:-apple-system,system-ui,sans-serif; touch-action:none; }
+canvas { display:block; width:100%; height:100%; }
+#hud { position:absolute; top:env(safe-area-inset-top,12px); left:12px; color:#f1f1ef; font-size:13px; pointer-events:none; text-shadow:0 1px 4px #000; line-height:1.4; }
+#mission { position:absolute; top:calc(env(safe-area-inset-top,12px) + 48px); left:50%; transform:translateX(-50%); color:#d4a84a; font-size:15px; font-weight:600; pointer-events:none; text-align:center; text-shadow:0 1px 4px #000; max-width:88%; }
+#ui { position:absolute; bottom:env(safe-area-inset-bottom,8px); left:0; right:0; pointer-events:none; }
+button { pointer-events:auto; background:rgba(11,18,32,0.75); color:#f1f1ef; border:1px solid #4ecdc4; border-radius:10px; padding:12px 16px; font-size:15px; margin:4px; backdrop-filter:blur(4px); }
+#stick { position:absolute; bottom:110px; left:18px; width:130px; height:130px; border:2px solid #4ecdc4; border-radius:50%; pointer-events:auto; background:rgba(11,18,32,0.35); }
+#stick-knob { position:absolute; width:46px; height:46px; background:#d4a84a; border-radius:50%; left:42px; top:42px; box-shadow:0 2px 6px rgba(0,0,0,0.4); }
+#zoom { position:absolute; top:env(safe-area-inset-top,12px); right:12px; color:#c9d0d8; font-size:12px; pointer-events:none; }
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js"}}
+</script>
+</head>
+<body>
+<div id="hud">ALT <span id="alt">0</span> ft &nbsp; SPD <span id="spd">0</span> kt<br>NAC <span id="nac">90°</span> &nbsp; <span id="mode">HELI</span> &nbsp; FUEL <span id="fuel">100</span>%</div>
+<div id="mission">Tilt to fly · Rescue the boat</div>
+<div id="zoom">Zoom 22</div>
+<div id="ui">
+  <div id="stick"><div id="stick-knob"></div></div>
+  <div style="position:absolute; bottom:16px; right:10px; text-align:right;">
+    <button id="btnCollUp">THR +</button>
+    <button id="btnCollDn">THR −</button><br>
+    <button id="btnNacUp">NAC ↑</button>
+    <button id="btnNacDn">NAC ↓</button><br>
+    <button id="btnYawL">YAW L</button>
+    <button id="btnYawR">YAW R</button>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a2438);
+scene.fog = new THREE.FogExp2(0x1a2438, 0.0012);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.5, 15000);
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const sun = new THREE.DirectionalLight(0xffc8a0, 1.8);
+sun.position.set(120, 40, -60);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.near = 10;
+sun.shadow.camera.far = 500;
+sun.shadow.camera.left = sun.shadow.camera.bottom = -120;
+sun.shadow.camera.right = sun.shadow.camera.top = 120;
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0x6ab0e0, 0x3a4a30, 0.65));
+scene.add(new THREE.AmbientLight(0x203040, 0.4));
+
+// Sky
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(9000, 32, 16),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    uniforms: { top:{value:new THREE.Color(0x0b1220)}, bot:{value:new THREE.Color(0x4a3020)}, exp:{value:0.55} },
+    vertexShader: `varying vec3 vP; void main(){ vec4 w=modelMatrix*vec4(position,1.0); vP=w.xyz; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader: `uniform vec3 top,bot; uniform float exp; varying vec3 vP; void main(){ float h=normalize(vP).y; gl_FragColor=vec4(mix(bot,top,pow(max(h,0.0),exp)),1.0); }`
+  })
+);
+scene.add(sky);
+
+// Terrain
+function noise(x,z){ return Math.sin(x*0.018)*Math.cos(z*0.014)*22 + Math.sin(x*0.06+z*0.04)*7 + Math.sin(z*0.1)*5; }
+const tSize=5000, tSeg=140;
+const tGeo = new THREE.PlaneGeometry(tSize, tSize, tSeg, tSeg);
+const pos = tGeo.attributes.position;
+for(let i=0;i<pos.count;i++){
+  const x=pos.getX(i), z=pos.getZ(i);
+  let h = noise(x,z);
+  const d = Math.hypot(x+300, z-50);
+  if(d<1100) h = Math.min(h, -1.5 + (d/1100)*6);
+  if(h<0.8) h=-0.3;
+  pos.setY(i, h);
+}
+tGeo.computeVertexNormals();
+const terrain = new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({ color:0x4a5a40, roughness:0.88, metalness:0.04 }));
+terrain.rotation.x = -Math.PI/2;
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+// Water
+const water = new THREE.Mesh(
+  new THREE.PlaneGeometry(6000,6000,100,100),
+  new THREE.ShaderMaterial({
+    transparent:true,
+    uniforms:{ time:{value:0}, color:{value:new THREE.Color(0x0a3a4a)}, sun:{value:sun.position.clone().normalize()} },
+    vertexShader: `uniform float time; varying vec3 vN,vW; void main(){ vec3 p=position; p.y += sin(p.x*0.035+time*0.55)*0.9 + sin(p.z*0.05+time*0.7)*0.55 + sin((p.x+p.z)*0.025+time*0.35)*0.4; vN=normalize(normalMatrix*normal); vec4 w=modelMatrix*vec4(p,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
+    fragmentShader: `uniform vec3 color,sun; varying vec3 vN,vW; void main(){ vec3 vd=normalize(cameraPosition-vW); float f=pow(1.0-max(dot(vN,vd),0.0),2.8); vec3 c=mix(color, vec3(0.55,0.7,0.95), f*0.55); float s=pow(max(dot(reflect(sun,vN),vd),0.0),28.0); gl_FragColor=vec4(c+s*0.45, 0.82); }`
+  })
+);
+water.rotation.x = -Math.PI/2;
+water.position.y = 0.15;
+scene.add(water);
+
+// Pad
+const pad = new THREE.Group();
+pad.add(new THREE.Mesh(new THREE.CylinderGeometry(14,14,0.5,40), new THREE.MeshStandardMaterial({color:0x2a3038,roughness:0.6})));
+const ring = new THREE.Mesh(new THREE.RingGeometry(11.5,13.2,40), new THREE.MeshStandardMaterial({color:0xd4a84a, emissive:0x5a4010, emissiveIntensity:0.6}));
+ring.rotation.x=-Math.PI/2; ring.position.y=0.35; pad.add(ring);
+pad.position.set(0,0.25,0);
+scene.add(pad);
+
+// Boat
+const boat = new THREE.Group();
+boat.add(new THREE.Mesh(new THREE.BoxGeometry(9,1.4,3.4), new THREE.MeshStandardMaterial({color:0x5a4a38})));
+const cab = new THREE.Mesh(new THREE.BoxGeometry(2.8,1.6,2.2), new THREE.MeshStandardMaterial({color:0x7a6a58}));
+cab.position.set(-1.2,1.3,0); boat.add(cab);
+boat.position.set(-320,1.4,220);
+scene.add(boat);
+
+// Osprey
+const osprey = new THREE.Group();
+const body = new THREE.MeshStandardMaterial({color:0x9aa8b0, roughness:0.55, metalness:0.35});
+const dark = new THREE.MeshStandardMaterial({color:0x2e343c, roughness:0.45, metalness:0.2});
+osprey.add(new THREE.Mesh(new THREE.BoxGeometry(2.4,2.6,15), body).translateZ(1.2));
+const nose = new THREE.Mesh(new THREE.CylinderGeometry(1.0,1.15,3.2,16), body);
+nose.rotation.x=Math.PI/2; nose.position.set(0,0.15,9.2); osprey.add(nose);
+osprey.add(new THREE.Mesh(new THREE.BoxGeometry(17.5,0.45,2.4), body).translateY(1.3));
+const tail = new THREE.Mesh(new THREE.BoxGeometry(0.35,3.2,1.4), body); tail.position.set(0,2.0,-7); osprey.add(tail);
+osprey.add(new THREE.Mesh(new THREE.BoxGeometry(4.4,0.22,0.9), body).translateY(2.8).translateZ(-7.2));
+
+function makeNacelle(side){
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.75,0.75,2.4,16), dark);
+  body.rotation.z=Math.PI/2; g.add(body);
+  g.add(new THREE.Mesh(new THREE.SphereGeometry(0.55,16,12), dark).translateX(side*1.3));
+  g.userData.blades=[];
+  for(let i=0;i<3;i++){
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.06,6.2), dark);
+    b.position.z=3.2;
+    const p = new THREE.Group(); p.add(b); p.rotation.x=(i/3)*Math.PI*2;
+    g.add(p); g.userData.blades.push(p);
+  }
+  g.position.set(side*8.6,1.3,0);
+  return g;
+}
+const nacL=makeNacelle(-1), nacR=makeNacelle(1);
+osprey.add(nacL,nacR);
+[[-1.4,-1.3,3.5],[1.4,-1.3,3.5],[0,-1.3,-4.5]].forEach(p=>{
+  const g=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,1.6,8), dark);
+  g.position.set(...p); osprey.add(g);
+});
+osprey.position.set(0,4,0);
+osprey.castShadow=true;
+scene.add(osprey);
+
+// State
+const state = { pos:new THREE.Vector3(0,4,0), vel:new THREE.Vector3(), pitch:0, roll:0, yaw:0, nacelle:Math.PI/2, collective:0, rotorRpm:0, fuel:1, onGround:true };
+let tiltX=0, tiltY=0, stickX=0, stickY=0, camDist=22, camOffset=new THREE.Vector2(), camMode=0, lastPinch=0, touches=[];
+const btnState={collup:false,colldn:false,nacup:false,nacdn:false,yawl:false,yawr:false};
+const keys={};
+const clock=new THREE.Clock();
+const mission={phase:'goto', target:boat.position.clone(), done:false};
+
+function requestOrient(){
+  if(typeof DeviceOrientationEvent!=='undefined' && DeviceOrientationEvent.requestPermission){
+    DeviceOrientationEvent.requestPermission().then(s=>{ if(s==='granted') addEventListener('deviceorientation', e=>{ tiltX=THREE.MathUtils.clamp((e.gamma||0)/28,-1,1); tiltY=THREE.MathUtils.clamp((e.beta||0)/38,-1,1); }); }).catch(()=>{});
+  } else addEventListener('deviceorientation', e=>{ tiltX=THREE.MathUtils.clamp((e.gamma||0)/28,-1,1); tiltY=THREE.MathUtils.clamp((e.beta||0)/38,-1,1); });
+}
+requestOrient();
+const perm=document.createElement('button'); perm.textContent='Enable Tilt'; perm.style.cssText='position:absolute;top:env(safe-area-inset-top,12px);left:50%;transform:translateX(-50%);z-index:10;'; perm.onclick=requestOrient; document.body.appendChild(perm);
+
+const stick=document.getElementById('stick'), knob=document.getElementById('stick-knob');
+function setStick(x,y){ const r=stick.getBoundingClientRect(); stickX=THREE.MathUtils.clamp((x-r.left-65)/52,-1,1); stickY=THREE.MathUtils.clamp((y-r.top-65)/52,-1,1); knob.style.left=(42+stickX*42)+'px'; knob.style.top=(42+stickY*42)+'px'; }
+stick.addEventListener('touchstart',e=>{e.preventDefault();setStick(e.touches[0].clientX,e.touches[0].clientY);});
+stick.addEventListener('touchmove',e=>{e.preventDefault();setStick(e.touches[0].clientX,e.touches[0].clientY);});
+stick.addEventListener('touchend',()=>{stickX=stickY=0;knob.style.left='42px';knob.style.top='42px';});
+
+['btnCollUp','btnCollDn','btnNacUp','btnNacDn','btnYawL','btnYawR'].forEach(id=>{
+  const k=id.replace('btn','').toLowerCase(), el=document.getElementById(id);
+  el.addEventListener('touchstart',e=>{e.preventDefault();btnState[k]=true;});
+  el.addEventListener('touchend',e=>{e.preventDefault();btnState[k]=false;});
+  el.addEventListener('touchcancel',e=>{e.preventDefault();btnState[k]=false;});
+});
+
+renderer.domElement.addEventListener('touchstart',e=>{ touches=Array.from(e.touches); if(touches.length===2) lastPinch=Math.hypot(touches[0].clientX-touches[1].clientX,touches[0].clientY-touches[1].clientY); });
+renderer.domElement.addEventListener('touchmove',e=>{
+  e.preventDefault(); touches=Array.from(e.touches);
+  if(touches.length===1 && !e.target.closest('#ui,#stick')){
+    const dx=touches[0].clientX-(touches.prevX||touches[0].clientX), dy=touches[0].clientY-(touches.prevY||touches[0].clientY);
+    camOffset.x-=dx*0.004; camOffset.y=THREE.MathUtils.clamp(camOffset.y-dy*0.004,-0.45,0.7);
+    touches.prevX=touches[0].clientX; touches.prevY=touches[0].clientY;
+  }
+  if(touches.length===2){
+    const d=Math.hypot(touches[0].clientX-touches[1].clientX,touches[0].clientY-touches[1].clientY);
+    camDist=THREE.MathUtils.clamp(camDist+(lastPinch-d)*0.12,10,55);
+    lastPinch=d; document.getElementById('zoom').textContent='Zoom '+camDist.toFixed(0);
+  }
+});
+renderer.domElement.addEventListener('touchend',()=>touches=[]);
+addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+addEventListener('keydown',e=>{ if(e.key==='c') camMode=(camMode+1)%3; });
+
+function update(dt){
+  let cycP=tiltY+stickY, cycR=tiltX+stickX, yawIn=0;
+  if(keys.w||keys.arrowup) cycP+=1; if(keys.s||keys.arrowdown) cycP-=1;
+  if(keys.a||keys.arrowleft) cycR-=1; if(keys.d||keys.arrowright) cycR+=1;
+  if(keys.q||btnState.yawl) yawIn-=1; if(keys.e||btnState.yawr) yawIn+=1;
+  if(keys.shift||btnState.collup) state.collective=Math.min(1,state.collective+dt*1.0);
+  if(keys.control||btnState.colldn) state.collective=Math.max(0,state.collective-dt*1.0);
+  if(keys.z||btnState.nacup) state.nacelle=Math.min(Math.PI/2,state.nacelle+dt*1.0);
+  if(keys.x||btnState.nacdn) state.nacelle=Math.max(0,state.nacelle-dt*1.0);
+  cycP=THREE.MathUtils.clamp(cycP,-1,1); cycR=THREE.MathUtils.clamp(cycR,-1,1);
+
+  const hel=Math.sin(state.nacelle), apl=Math.cos(state.nacelle);
+  state.rotorRpm=Math.min(1,state.rotorRpm+dt*0.7);
+  if(state.collective>0.05) state.fuel=Math.max(0,state.fuel-dt*0.007);
+
+  state.pitch+=cycP*(0.55+hel*0.45)*dt; state.roll+=cycR*(0.7+hel*0.4)*dt; state.yaw+=yawIn*1.3*dt;
+  state.pitch=THREE.MathUtils.clamp(state.pitch,-0.65,0.65); state.roll=THREE.MathUtils.clamp(state.roll,-0.75,0.75);
+  state.pitch*=Math.pow(0.94,dt*60); state.roll*=Math.pow(0.88,dt*60);
+
+  const mag=state.collective*42*state.rotorRpm*(state.fuel>0?1:0.15);
+  const dir=new THREE.Vector3(
+    Math.sin(state.yaw)*Math.cos(state.pitch)*apl + Math.sin(state.roll)*hel*0.25,
+    Math.sin(state.nacelle)*Math.cos(state.pitch)+Math.sin(state.pitch)*0.35,
+    Math.cos(state.yaw)*Math.cos(state.pitch)*apl
+  ).normalize();
+  const acc=dir.multiplyScalar(mag); acc.y-=9.8;
+  acc.sub(state.vel.clone().multiplyScalar(0.38+apl*0.12));
+  state.vel.add(acc.multiplyScalar(dt)); state.vel.multiplyScalar(0.985);
+  state.pos.add(state.vel.clone().multiplyScalar(dt));
+
+  if(state.pos.y<2.8){ state.pos.y=2.8; state.vel.y=Math.max(0,state.vel.y*-0.25); state.onGround=true; if(state.collective<0.25){state.vel.x*=0.92;state.vel.z*=0.92;} }
+  else state.onGround=false;
+
+  osprey.position.copy(state.pos);
+  osprey.rotation.set(state.pitch,state.yaw,state.roll,'YXZ');
+  nacL.rotation.x=nacR.rotation.x=state.nacelle-Math.PI/2;
+  const spin=state.rotorRpm*45*dt;
+  [...nacL.userData.blades,...nacR.userData.blades].forEach(b=>b.rotation.x+=spin);
+
+  const d=state.pos.distanceTo(mission.target);
+  if(mission.phase==='goto' && d<28 && state.pos.y<9){ mission.phase='return'; mission.target.set(0,4,0); document.getElementById('mission').textContent='Survivor aboard — return to pad'; }
+  if(mission.phase==='return' && d<20 && state.onGround){ mission.done=true; document.getElementById('mission').textContent='Rescue complete · Fuel '+Math.round(state.fuel*100)+'%'; }
+
+  const look=state.pos.clone();
+  if(camMode===0){
+    const back=new THREE.Vector3(Math.sin(state.yaw+camOffset.x),0.35+camOffset.y,Math.cos(state.yaw+camOffset.x)).multiplyScalar(-camDist);
+    camera.position.lerp(state.pos.clone().add(back).add(new THREE.Vector3(0,7,0)),0.14);
+    camera.lookAt(look.add(new THREE.Vector3(0,1.2,0)));
+  } else if(camMode===1){
+    camera.position.lerp(state.pos.clone().add(new THREE.Vector3(camOffset.x*12, 32+camDist*0.35, 18+camOffset.y*10)),0.1);
+    camera.lookAt(look);
+  } else {
+    camera.position.lerp(state.pos.clone().add(new THREE.Vector3(9+camOffset.x*4,5+camOffset.y*3,-7)),0.18);
+    camera.lookAt(look);
+  }
+
+  document.getElementById('alt').textContent=Math.round(state.pos.y*3.28);
+  document.getElementById('spd').textContent=Math.round(state.vel.length()*1.94);
+  document.getElementById('nac').textContent=Math.round(THREE.MathUtils.radToDeg(state.nacelle))+'\u00b0';
+  document.getElementById('mode').textContent=state.nacelle>1.15?'HELI':state.nacelle>0.35?'CONV':'PLANE';
+  document.getElementById('fuel').textContent=Math.round(state.fuel*100);
+}
+
+function loop(){ requestAnimationFrame(loop); const dt=Math.min(clock.getDelta(),0.05); water.material.uniforms.time.value+=dt; update(dt); renderer.render(scene,camera); }
+loop();
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+</script>
+</body>
+</html>
